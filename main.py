@@ -1,60 +1,191 @@
 import telebot
 import os
+import json
 from dotenv import load_dotenv
+from pydub import AudioSegment
+
+# --- Кастомные импорты ---
 import keyboards as kb
+import gemini_ai as ai
 from functions import (
     load_tasks, save_tasks, add_todo,
-    get_tasks_string, clear_all_tasks, parse_date
+    get_tasks_string, clear_all_tasks
 )
-# --- Imports for Scheduler ---
+
+# --- Импорты для планировщика ---
 import time
 import threading
-from datetime import datetime, date
-import pytz # <-- Новая библиотека
+from datetime import datetime
+import pytz
 
+# --- Инициализация ---
 load_dotenv()
-
-# --- Текст помощи и токен ---
-HELP = """
-Я - ваш личный бот-помощник для управления задачами.
-
-С помощью кнопок ниже вы можете:
-- ❓ **Помощь**: Показать это сообщение.
-- ➕ **Добавить задачу**: Начать диалог добавления новой задачи.
-- 📋 **Показать задачи**: Увидеть все ваши задачи.
-- 🗑️ **Удалить все**: Стереть все задачи безвозвратно.
-
-Для перезапуска бота введите команду /start.
-"""
 token = os.getenv('TELEGRAM_TOKEN')
 bot = telebot.TeleBot(token)
-
-# --- Настройки для уведомлений ---
-# ID администратора для отправки уведомлений.
-ADMIN_ID = "8137874571"
-# Устанавливаем часовой пояс
-MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-# Переменная для хранения даты последней отправки уведомления
-last_notification_date = None
-
 tasks = load_tasks()
 
-# --- Логика уведомлений и планировщика ---
+# --- Константы и настройки ---
+HELP = """
+Я - ваш личный AI-ассистент для управления задачами. 
 
+**Что я умею:**
+- Добавлять задачи голосом или текстом (например, *"добавь на завтра купить молоко"*).
+- Показывать задачи (*"что у меня на сегодня?"*).
+- Удалять все задачи.
+- Помогать (*"помощь"* или *"что ты умеешь"*).
+
+Вы также можете использовать кнопки в меню.
+Для перезапуска введите команду /start.
+"""
+ADMIN_ID = "8137874571"  # ID администратора для уведомлений
+MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+last_notification_date = None
+TEMP_DIR = "temp"
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR)
+
+# --- Основная логика обработки команд ---
+def process_command(text, chat_id):
+    """Центральная функция для обработки текстовых команд, полученных от пользователя или после распознавания голоса."""
+    bot.send_message(chat_id, "Думаю... 🤔", disable_notification=True)
+    
+    # Получаем намерение от AI
+    intent_json_str = ai.get_intent(text)
+    print(f"[AI] Распознано намерение: {intent_json_str}")
+
+    try:
+        intent_data = json.loads(intent_json_str)
+        intent = intent_data.get("intent", "unknown")
+
+        if intent == "add_task":
+            date = intent_data.get("date")
+            task = intent_data.get("task")
+            if date and task:
+                add_todo(date, task, tasks)
+                save_tasks(tasks)
+                bot.send_message(chat_id, f"✅ Добавлено: [{date}] — {task}")
+            else:
+                bot.send_message(chat_id, "Не смог распознать дату или текст задачи. Попробуйте еще раз.")
+            show_main_menu(chat_id)
+
+        elif intent == "show_tasks":
+            tasks_string = get_tasks_string(tasks, intent_data.get("date"))
+            bot.send_message(chat_id, tasks_string)
+            show_main_menu(chat_id)
+
+        elif intent == "delete_tasks":
+            # Пока что удаляем все, в будущем можно расширить на конкретную дату
+            clear_all_tasks(tasks)
+            save_tasks(tasks)
+            bot.send_message(chat_id, "🗑️ Все задачи удалены.")
+            show_main_menu(chat_id)
+
+        elif intent == "help":
+            show_main_menu(chat_id, HELP)
+
+        else: # unknown intent
+            bot.send_message(chat_id, "Не совсем понял вас. Попробуйте переформулировать или воспользуйтесь кнопками.")
+            show_main_menu(chat_id)
+
+    except json.JSONDecodeError:
+        print(f"[Ошибка] Не удалось распарсить JSON от AI: {intent_json_str}")
+        bot.send_message(chat_id, "Произошла внутренняя ошибка при обработке вашего запроса. Попробуйте позже.")
+        show_main_menu(chat_id)
+
+# --- Обработчики сообщений Telegram ---
+@bot.message_handler(commands=["start"])
+def start_command(message):
+    """Обработчик команды /start."""
+    welcome_text = f"Добро пожаловать, {message.from_user.first_name}!" + HELP
+    show_main_menu(message.chat.id, welcome_text)
+
+@bot.message_handler(content_types=['voice'])
+def handle_voice_message(message):
+    """Обрабатывает голосовые сообщения."""
+    chat_id = message.chat.id
+    try:
+        bot.send_message(chat_id, "Получил голосовое, распознаю... 🎤", disable_notification=True)
+        
+        # Скачиваем oga файл
+        file_info = bot.get_file(message.voice.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        oga_path = os.path.join(TEMP_DIR, f"{message.voice.file_id}.oga")
+        with open(oga_path, 'wb') as new_file:
+            new_file.write(downloaded_file)
+
+        # Конвертируем в wav
+        wav_path = os.path.join(TEMP_DIR, f"{message.voice.file_id}.wav")
+        audio = AudioSegment.from_ogg(oga_path)
+        audio.export(wav_path, format="wav")
+        print(f"[Аудио] Конвертировано в {wav_path}")
+
+        # Распознаем речь
+        recognized_text = ai.speech_to_text(wav_path)
+
+        # Очистка временных файлов
+        os.remove(oga_path)
+        os.remove(wav_path)
+
+        if recognized_text:
+            bot.send_message(chat_id, f"Вы сказали: *{recognized_text}*", parse_mode='Markdown')
+            process_command(recognized_text, chat_id)
+        else:
+            bot.send_message(chat_id, "Не удалось распознать речь. Попробуйте еще раз.")
+            show_main_menu(chat_id)
+
+    except Exception as e:
+        print(f"[Ошибка] Проблема с обработкой голоса: {e}")
+        bot.send_message(chat_id, "Произошла ошибка при обработке вашего голосового сообщения.")
+        show_main_menu(chat_id)
+
+@bot.message_handler(content_types=["text"])
+def handle_text_message(message):
+    """Обрабатывает текстовые сообщения, прогоняя их через AI."""
+    process_command(message.text, message.chat.id)
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback_query(call):
+    """Обработчик нажатий на inline-кнопки."""
+    chat_id = call.message.chat.id
+    message_id = call.message.message_id
+    bot.edit_message_reply_markup(chat_id, message_id, reply_markup=None) # Убираем кнопки
+
+    command = call.data
+    
+    # Для простых команд можно не использовать AI, а действовать напрямую
+    if command == "help":
+        show_main_menu(chat_id, HELP)
+    elif command == "show":
+        tasks_string = get_tasks_string(tasks)
+        bot.send_message(chat_id, tasks_string)
+        show_main_menu(chat_id)
+    elif command == "delete":
+        clear_all_tasks(tasks)
+        save_tasks(tasks)
+        bot.send_message(chat_id, "🗑️ Все задачи удалены.")
+        show_main_menu(chat_id)
+    elif command == "add":
+        # Для добавления задачи нужен диалог, который AI пока не умеет вести
+        msg = bot.send_message(chat_id, "Введите задачу и дату (например, 'купить молоко завтра'):")
+        bot.register_next_step_handler(msg, lambda m: process_command(m.text, m.chat.id))
+
+def show_main_menu(chat_id, text="Выберите действие или дайте команду голосом/текстом:"):
+    """Отправляет сообщение с главным меню."""
+    bot.send_message(chat_id, text, reply_markup=kb.create_main_menu_keyboard(), parse_mode='Markdown')
+
+# --- Логика уведомлений и планировщика (без изменений) ---
 def check_tasks_and_notify():
     """Проверяет задачи на сегодня и отправляет уведомление."""
     global last_notification_date
-
     if ADMIN_ID == "YOUR_TELEGRAM_ID":
         print("Внимание: ADMIN_ID не установлен. Уведомления не будут отправляться.")
         return
 
-    # Получаем сегодняшнюю дату в часовом поясе Москвы
     today_moscow = datetime.now(MOSCOW_TZ).date()
     today_str = today_moscow.strftime('%Y-%m-%d')
     
-    # Обновляем дату последнего уведомления
-    last_notification_date = today_moscow
+    if today_moscow == last_notification_date:
+        return # Уже отправляли сегодня
 
     current_tasks = load_tasks()
     if today_str in current_tasks and current_tasks[today_str]:
@@ -65,120 +196,27 @@ def check_tasks_and_notify():
         
         try:
             bot.send_message(ADMIN_ID, message)
-            print(f"Уведомление о задачах на {today_str} отправлено администратору.")
+            last_notification_date = today_moscow # Обновляем дату после успешной отправки
+            print(f"Уведомление о задачах на {today_str} отправлено.")
         except Exception as e:
             print(f"Ошибка при отправке уведомления: {e}")
     else:
         print(f"На {today_str} нет задач, уведомление не отправлено.")
 
-
 def run_scheduler():
-    """
-    Запускает цикл проверки времени.
-    Проверяет время раз в час.
-    """
-    global last_notification_date
-    
+    """Запускает цикл проверки времени для уведомлений."""
     while True:
         now_moscow = datetime.now(MOSCOW_TZ)
-        today_moscow = now_moscow.date()
-
-        # Проверяем, что час >= 5 и что мы еще не отправляли уведомление сегодня
-        if now_moscow.hour >= 5 and today_moscow != last_notification_date:
-            print(f"Время {now_moscow.strftime('%H:%M')} по Москве, запускаю проверку задач...")
+        if now_moscow.hour >= 9:
             check_tasks_and_notify()
-
-        # Ждем один час
-        time.sleep(3600)
-
-# --- Обработчики сообщений Telegram ---
-
-def show_main_menu(chat_id, text="Выберите действие:"):
-    """Отправляет сообщение с главным меню."""
-    bot.send_message(chat_id, text, reply_markup=kb.create_main_menu_keyboard(), parse_mode='Markdown')
-
-@bot.message_handler(commands=["start"])
-def start_command(message):
-    """Обработчик команды /start."""
-    if str(message.chat.id) == str(ADMIN_ID):
-        welcome_text = "Добро пожаловать, администратор!\n\n" + HELP
-    else:
-        welcome_text = "Добро пожаловать!\n\n" + HELP
-    show_main_menu(message.chat.id, welcome_text)
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback_query(call):
-    """Главный обработчик всех нажатий на inline-кнопки."""
-    chat_id = call.message.chat.id
-    message_id = call.message.message_id
-    bot.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
-
-    if call.data == "help":
-        show_main_menu(chat_id, HELP)
-    elif call.data == "add":
-        msg = bot.send_message(chat_id, "Введите дату (сегодня, завтра, ДД.ММ, ММ-ДД или ГГГГ-ММ-ДД)")
-        bot.register_next_step_handler(msg, process_date_input)
-    elif call.data == "show":
-        tasks_string = get_tasks_string(tasks)
-        bot.send_message(chat_id, tasks_string)
-        show_main_menu(chat_id)
-    elif call.data == "delete":
-        if not tasks:
-            bot.send_message(chat_id, "Список задач уже пуст.")
-        else:
-            clear_all_tasks(tasks)
-            save_tasks(tasks)
-            bot.send_message(chat_id, "Все задачи удалены.")
-        show_main_menu(chat_id)
-    elif call.data.startswith("confirm_yes:"):
-        proposed_date = call.data.split(":")[1]
-        ask_for_task_text(chat_id, proposed_date)
-    elif call.data == "confirm_no":
-        bot.send_message(chat_id, "Ввод отменен.")
-        show_main_menu(chat_id)
-
-def process_date_input(message):
-    """Обрабатывает введенную пользователем дату."""
-    status, date_str = parse_date(message.text)
-    if status == "ok":
-        ask_for_task_text(message.chat.id, date_str)
-    elif status == "past":
-        bot.send_message(
-            message.chat.id,
-            f"Эта дата в прошлом. Вы имели в виду {date_str}?",
-            reply_markup=kb.create_yes_no_keyboard(date_str)
-        )
-    elif status == "invalid":
-        error_text = "Неверный формат даты. Попробуйте еще раз."
-        if date_str == "past_date":
-             error_text = "Вы указали уже прошедшую дату."
-        bot.send_message(message.chat.id, error_text)
-        show_main_menu(message.chat.id)
-
-def ask_for_task_text(chat_id, date_str):
-    """Запрашивает у пользователя текст задачи."""
-    msg = bot.send_message(chat_id, "Теперь введите текст задачи:")
-    bot.register_next_step_handler(msg, process_task, date_str)
-
-def process_task(message, date):
-    """Обрабатывает текст задачи и сохраняет ее."""
-    task = message.text.strip()
-    add_todo(date, task, tasks)
-    save_tasks(tasks)
-    bot.send_message(message.chat.id, f"✅ Добавлено: [{date}] — {task}")
-    show_main_menu(message.chat.id)
-
-@bot.message_handler(content_types=["text"])
-def echo(message):
-    show_main_menu(message.chat.id, "Используйте кнопки для навигации.")
+        time.sleep(3600) # Проверка раз в час
 
 # --- Запуск бота и планировщика ---
 if __name__ == '__main__':
     scheduler_thread = threading.Thread(target=run_scheduler)
     scheduler_thread.daemon = True
     scheduler_thread.start()
-    print("Планировщик запущен в фоновом режиме (проверка раз в час).")
+    print("Планировщик запущен.")
     
-    print("Бот запускается...")
+    print("AI-бот запускается...")
     bot.polling(none_stop=True)
-

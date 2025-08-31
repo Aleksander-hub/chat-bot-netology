@@ -1,63 +1,7 @@
 import json
-from datetime import datetime, timedelta
-import re
+from datetime import datetime
 
 TASKS_FILE = "tasks.json"
-
-def parse_date(user_input):
-    """
-    Парсит ввод пользователя и возвращает дату.
-    Возвращает кортеж (статус, дата).
-    Статусы: "ok", "past", "invalid".
-    """
-    user_input = user_input.strip().lower()
-    today = datetime.now().date()
-
-    if user_input == "сегодня":
-        return "ok", today.strftime('%Y-%m-%d')
-    elif user_input == "завтра":
-        tomorrow = today + timedelta(days=1)
-        return "ok", tomorrow.strftime('%Y-%m-%d')
-
-    # Проверка на ДД.ММ
-    match = re.fullmatch(r'(\d{2})\.(\d{2})', user_input)
-    if match:
-        day, month = int(match.group(1)), int(match.group(2))
-        try:
-            date = datetime(today.year, month, day).date()
-            if date < today:
-                return "past", date.replace(year=today.year + 1).strftime('%Y-%m-%d')
-            else:
-                return "ok", date.strftime('%Y-%m-%d')
-        except ValueError:
-            return "invalid", None
-
-    # Проверка на ММ-ДД
-    match = re.fullmatch(r'(\d{2})-(\d{2})', user_input)
-    if match:
-        month, day = int(match.group(1)), int(match.group(2))
-        try:
-            date = datetime(today.year, month, day).date()
-            if date < today:
-                return "past", date.replace(year=today.year + 1).strftime('%Y-%m-%d')
-            else:
-                return "ok", date.strftime('%Y-%m-%d')
-        except ValueError:
-            return "invalid", None
-
-    # Проверка на ГГГГ-ММ-ДД
-    match = re.fullmatch(r'(\d{4})-(\d{2})-(\d{2})', user_input)
-    if match:
-        year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-        try:
-            date = datetime(year, month, day).date()
-            if date < today:
-                return "invalid", "past_date"
-            return "ok", date.strftime('%Y-%m-%d')
-        except ValueError:
-            return "invalid", None
-            
-    return "invalid", None
 
 def load_tasks():
     """Загружает задачи из файла tasks.json."""
@@ -76,41 +20,51 @@ def add_todo(date, task, tasks):
     """Добавляет задачу в словарь (модифицирует на месте)."""
     tasks.setdefault(date, []).append(task)
 
-def get_tasks_string(tasks):
-    """Формирует строку с задачами для вывода."""
+def get_tasks_string(tasks, specific_date=None):
+    """Формирует строку с задачами для вывода.
+
+    Args:
+        tasks (dict): Словарь с задачами.
+        specific_date (str, optional): Если указана, показывает задачи только на эту дату.
+    """
     if not tasks:
-        return "Список задач пуст"
-    
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    
-    today_tasks_formatted = []
-    other_tasks_formatted = []
+        return "Список задач пуст."
 
-    for date, task_list in sorted(tasks.items()):
-        if not task_list:
-            continue
-        
-        # Форматируем задачи для одной даты
-        formatted_tasks = []
-        for i, t in enumerate(task_list, 1):
-            formatted_tasks.append(f"  {i}. {t}")
-        
-        # Распределяем
-        if date == today_str:
-            today_tasks_formatted.extend(formatted_tasks)
+    # Если запрошена конкретная дата
+    if specific_date:
+        if specific_date in tasks and tasks[specific_date]:
+            task_list = tasks[specific_date]
+            formatted_tasks = [f"{i}. {t}" for i, t in enumerate(task_list, 1)]
+            return f"Задачи на {specific_date}:\n" + "\n".join(formatted_tasks)
         else:
-            other_tasks_formatted.append(f"{date}:\n" + "\n".join(formatted_tasks))
+            return f"На {specific_date} задач нет."
 
-    # Собираем итоговое сообщение
-    final_message_parts = []
-    if today_tasks_formatted:
-        final_message_parts.append("--- Задачи на сегодня ---")
-        final_message_parts.append("\n".join(today_tasks_formatted))
+    # Если дата не указана, показываем все задачи
+    all_tasks_parts = []
+    today_str = datetime.now().strftime('%Y-%m-%d')
 
-    if other_tasks_formatted:
-        final_message_parts.append("\n".join(other_tasks_formatted))
-        
-    return "\n\n".join(final_message_parts) if final_message_parts else "Список задач пуст"
+    # Сначала задачи на сегодня, если они есть
+    if today_str in tasks and tasks[today_str]:
+        all_tasks_parts.append("--- Задачи на сегодня ---")
+        today_tasks = [f"  {i}. {t}" for i, t in enumerate(tasks[today_str], 1)]
+        all_tasks_parts.append("\n".join(today_tasks))
+
+    # Затем остальные задачи, отсортированные по дате
+    other_tasks_parts = []
+    for date, task_list in sorted(tasks.items()):
+        if date == today_str or not task_list:
+            continue
+        formatted_tasks = [f"  {i}. {t}" for i, t in enumerate(task_list, 1)]
+        other_tasks_parts.append(f"{date}:\n" + "\n".join(formatted_tasks))
+    
+    if other_tasks_parts:
+        all_tasks_parts.append("--- Остальные задачи ---")
+        all_tasks_parts.append("\n\n".join(other_tasks_parts))
+
+    if not all_tasks_parts:
+        return "Список задач пуст."
+
+    return "\n\n".join(all_tasks_parts)
 
 def clear_all_tasks(tasks):
     """Очищает все задачи (модифицирует на месте)."""
