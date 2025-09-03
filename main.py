@@ -93,8 +93,8 @@ def run_scheduler():
     """Запускает цикл проверки времени для уведомлений."""
     while True:
         now_moscow = datetime.now(MOSCOW_TZ)
-        # Проверяем задачи в определенное время, например, в 9 утра
-        if now_moscow.hour == 9:
+        # Проверяем задачи в определенное время, например, в 5 утра
+        if now_moscow.hour == 5:
             check_tasks_and_notify()
         time.sleep(3600) # Проверка раз в час
 

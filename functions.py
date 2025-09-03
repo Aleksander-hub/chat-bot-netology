@@ -82,9 +82,6 @@ def show_tasks(specific_date: str = None) -> str:
         all_tasks_parts.append("\n\n".join(other_tasks_parts))
 
     if not all_tasks_parts:
-        # Это может случиться, если задачи есть только на сегодня
-        if today_str in tasks and tasks.get(today_str):
-             return "\n\n".join(all_tasks_parts)
         return "Актуальных задач нет."
 
     return "\n\n".join(all_tasks_parts)
